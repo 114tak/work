@@ -1,0 +1,10 @@
+{
+    "python.defaultInterpreterPath": "${workspaceFolder}\\game\\.venv-1\\Scripts\\python.exe",
+    "python-envs.pythonProjects": [
+        {
+            "path": "game",
+            "envManager": "ms-python.python:venv",
+            "packageManager": "ms-python.python:pip"
+        }
+    ]
+}
