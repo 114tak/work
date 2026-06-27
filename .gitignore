@@ -33,6 +33,8 @@ dist/
 
 # Local virtual environments
 pip-wheel-metadata/
+.venv-1/
+game/.venv-1/
 
 # Misc
 *.swp
