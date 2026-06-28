@@ -1,20 +1,18 @@
 import concurrent.futures
 import os
 import threading
-
+import tkinter as tk
 import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle
+from PIL import Image, ImageTk
 
 
-
-def _mandelbrot_chunk(xmin, xmax, ymin, ymax, width, height, max_iter, row_start, row_end):
-    real = np.linspace(xmin, xmax, width)
-    imag = np.linspace(ymin, ymax, height)
-    c = real[np.newaxis, :] + 1j * imag[row_start:row_end, np.newaxis]
+def _compute_mandelbrot_tile(x_min, x_max, y_min, y_max, width, height, max_iter, x_start, x_end, y_start, y_end):
+    real = np.linspace(x_min, x_max, width, dtype=np.float64)[x_start:x_end]
+    imag = np.linspace(y_min, y_max, height, dtype=np.float64)[y_start:y_end]
+    c = real[np.newaxis, :] + imag[:, np.newaxis] * 1j
 
     z = np.zeros_like(c)
-    div_time = np.full(c.shape, max_iter, dtype=int)
+    div_time = np.full(c.shape, max_iter, dtype=np.int32)
     mask = np.ones(c.shape, dtype=bool)
 
     for i in range(max_iter):
@@ -26,247 +24,159 @@ def _mandelbrot_chunk(xmin, xmax, ymin, ymax, width, height, max_iter, row_start
         if not mask.any():
             break
 
-    return row_start, div_time
+    return x_start, y_start, div_time
 
 
-def create_mandelbrot(xmin, xmax, ymin, ymax, width, height, max_iter, progress_callback=None):
-    num_threads = min(8, max(1, os.cpu_count() or 4))
-    rows_per_chunk = max(1, height // num_threads)
-    chunks = []
+class MandelbrotApp:
+    def __init__(self, master):
+        self.master = master
+        master.title("Mandelbrot Viewer")
 
-    for row_start in range(0, height, rows_per_chunk):
-        row_end = min(height, row_start + rows_per_chunk)
-        chunks.append((xmin, xmax, ymin, ymax, width, height, max_iter, row_start, row_end))
+        self.width = 800
+        self.height = 800
+        self.max_iter = 100
 
-    mandelbrot_set = np.empty((height, width), dtype=int)
-    total_chunks = len(chunks)
-    completed = 0
+        self.x_min, self.x_max = -2.0, 1.0
+        self.y_min, self.y_max = -1.5, 1.5
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
-        futures = [executor.submit(_mandelbrot_chunk, *chunk) for chunk in chunks]
-        for future in concurrent.futures.as_completed(futures):
-            row_start, result = future.result()
-            mandelbrot_set[row_start:row_start + result.shape[0], :] = result
-            completed += 1
-            if progress_callback is not None:
-                progress_callback(completed, total_chunks)
+        self.canvas = tk.Canvas(master, width=self.width, height=self.height, bg="black")
+        self.canvas.pack()
 
-    return mandelbrot_set
+        # Reset button
+        reset_button = tk.Button(master, text="🏠", command=self.reset_view)
+        reset_button.pack(side=tk.LEFT, padx=5, pady=5)
 
+        # Bind 'r' key to reset
+        self.master.bind('r', self.reset_view)
 
-class MandelbrotExplorer:
-    def __init__(self, xmin=-2.0, xmax=1.0, ymin=-1.5, ymax=1.5, width=800, height=600, max_iter=100):
-        self.xmin = xmin
-        self.xmax = xmax
-        self.ymin = ymin
-        self.ymax = ymax
-        self.width = width
-        self.height = height
-        self.max_iter = max_iter
+        # Mouse events for zooming
+        self.canvas.bind("<Button-1>", self.on_button_press)
+        self.canvas.bind("<B1-Motion>", self.on_mouse_drag)
+        self.canvas.bind("<ButtonRelease-1>", self.on_button_release)
 
-        self.press_event = None
-        self.rect_patch = None
-        self.colorbar = None
+        self.start_x = None
+        self.start_y = None
+        self.rect_id = None
 
-        self.fig, self.ax = plt.subplots(figsize=(10, 7.5))
-        self.fig.subplots_adjust(bottom=0.14)
-        self.image = None
-        self.status_text = None
-        self.progress_bar_bg = None
-        self.progress_bar_fg = None
-        self.toolbar_connected = False
-        self._render_thread = None
-        self._rendering = False
+        self.drawing_text_id = None # To hold the ID of the "Drawing..." text
 
-        self._connect_events()
-        self.fig.canvas.mpl_connect('draw_event', self._connect_toolbar_home)
-        self._connect_toolbar_home()
-        self.redraw(initial=True)
-        plt.show()
+        self.draw_mandelbrot()
 
-    def _connect_events(self):
-        self.fig.canvas.mpl_connect('button_press_event', self.on_press)
-        self.fig.canvas.mpl_connect('button_release_event', self.on_release)
-        self.fig.canvas.mpl_connect('motion_notify_event', self.on_motion)
-        self.fig.canvas.mpl_connect('key_press_event', self.on_key)
+    def reset_view(self, event=None):
+        self.x_min, self.x_max = -2.0, 1.0
+        self.y_min, self.y_max = -1.5, 1.5
+        self.draw_mandelbrot()
 
-    def _connect_toolbar_home(self, event=None):
-        toolbar = getattr(self.fig.canvas.manager, 'toolbar', None)
-        if toolbar is None:
-            return
+    def on_button_press(self, event):
+        self.start_x = event.x
+        self.start_y = event.y
+        if self.rect_id:
+            self.canvas.delete(self.rect_id)
+        self.rect_id = None
 
-        if hasattr(toolbar, '_buttons') and 'Home' in toolbar._buttons:
-            try:
-                toolbar._buttons['Home'].configure(command=self.reset_view)
-            except Exception:
-                pass
+    def _aspect_corrected_coords(self, x0, y0, x1, y1):
+        dx = x1 - x0
+        dy = y1 - y0
+        if dx == 0 or dy == 0:
+            return x1, y1
 
-        if hasattr(toolbar, 'home'):
-            try:
-                toolbar.home = self.reset_view
-            except Exception:
-                pass
-
-    def redraw(self, initial=False):
-        if self._rendering:
-            return
-
-        if self.image is None or initial:
-            self.ax.clear()
-            self.colorbar = None
-            self.status_text = self.ax.text(
-                0.01, 0.01, 'Rendering...',
-                transform=self.ax.transAxes,
-                color='white', fontsize=10,
-                va='bottom', ha='left',
-                bbox=dict(facecolor='black', alpha=0.6, pad=0.3)
-            )
-            self.progress_bar_bg = Rectangle((0.01, 0.04), 0.3, 0.02,
-                                            transform=self.ax.transAxes,
-                                            color='white', alpha=0.4)
-            self.progress_bar_fg = Rectangle((0.01, 0.04), 0.0, 0.02,
-                                            transform=self.ax.transAxes,
-                                            color='lime', alpha=0.9)
-            self.ax.add_patch(self.progress_bar_bg)
-            self.ax.add_patch(self.progress_bar_fg)
+        aspect = self.width / self.height
+        if abs(dx) > abs(dy) * aspect:
+            dx = np.sign(dx) * abs(dy) * aspect
         else:
-            self._set_status('Rendering...')
-            self._set_progress(0, 1)
+            dy = np.sign(dy) * abs(dx) / aspect
 
-        self.fig.canvas.draw_idle()
-        self._rendering = True
-        self._render_thread = threading.Thread(target=self._render_background, args=(initial,), daemon=True)
-        self._render_thread.start()
+        return int(x0 + dx), int(y0 + dy)
 
-    def _call_in_gui(self, func):
-        manager = getattr(self.fig.canvas, 'manager', None)
-        if manager is not None and hasattr(manager, 'window') and hasattr(manager.window, 'after'):
-            manager.window.after(0, func)
+    def on_mouse_drag(self, event):
+        cur_x, cur_y = self._aspect_corrected_coords(self.start_x, self.start_y, event.x, event.y)
+        cur_x = max(0, min(self.width, cur_x))
+        cur_y = max(0, min(self.height, cur_y))
+
+        if not self.rect_id:
+            self.rect_id = self.canvas.create_rectangle(self.start_x, self.start_y, cur_x, cur_y, outline="white", dash=(2,2))
         else:
-            timer = self.fig.canvas.new_timer(interval=1)
-            timer.add_callback(func)
-            timer.start()
+            self.canvas.coords(self.rect_id, self.start_x, self.start_y, cur_x, cur_y)
 
-    def _render_background(self, initial):
-        mandelbrot_set = create_mandelbrot(
-            self.xmin, self.xmax, self.ymin, self.ymax,
-            self.width, self.height, self.max_iter,
-            progress_callback=self._update_progress
-        )
-        self._call_in_gui(lambda: self._finish_render(mandelbrot_set, initial))
+    def on_button_release(self, event):
+        end_x, end_y = self._aspect_corrected_coords(self.start_x, self.start_y, event.x, event.y)
+        end_x = max(0, min(self.width, end_x))
+        end_y = max(0, min(self.height, end_y))
 
-    def _finish_render(self, mandelbrot_set, initial):
-        self._rendering = False
-        if self.image is None or initial:
-            self.image = self.ax.imshow(
-                mandelbrot_set,
-                extent=[self.xmin, self.xmax, self.ymin, self.ymax],
-                cmap='inferno',
-                origin='lower',
-                interpolation='nearest'
-            )
-            self.colorbar = self.ax.figure.colorbar(self.image, ax=self.ax, label='Iteration count')
-            self.ax.set_title('Mandelbrot Set')
-            self.ax.set_xlabel('Real axis')
-            self.ax.set_ylabel('Imaginary axis')
-        else:
-            self.image.set_data(mandelbrot_set)
-            self.image.set_extent([self.xmin, self.xmax, self.ymin, self.ymax])
-            self.image.set_clim(0, self.max_iter)
-            self.ax.set_xlim(self.xmin, self.xmax)
-            self.ax.set_ylim(self.ymin, self.ymax)
+        if self.rect_id:
+            self.canvas.delete(self.rect_id)
+            self.rect_id = None
 
-        self._set_status('Done')
-        self._set_progress(1, 1)
-        self.fig.canvas.draw_idle()
-
-    def _set_status(self, text):
-        if self.status_text is not None:
-            self.status_text.set_text(text)
-
-    def _set_progress(self, completed, total):
-        if self.progress_bar_fg is None:
+        # Ensure the selection is valid and has some size
+        if abs(end_x - self.start_x) < 2 or abs(end_y - self.start_y) < 2:
             return
-        width = 0.3 * (completed / total) if total else 0.0
-        self.progress_bar_fg.set_width(width)
+        
+        # Calculate new min/max values based on selection
+        new_x_min = self.x_min + (min(self.start_x, end_x) / self.width) * (self.x_max - self.x_min)
+        new_x_max = self.x_min + (max(self.start_x, end_x) / self.width) * (self.x_max - self.x_min)
+        new_y_min = self.y_min + (min(self.start_y, end_y) / self.height) * (self.y_max - self.y_min)
+        new_y_max = self.y_min + (max(self.start_y, end_y) / self.height) * (self.y_max - self.y_min)
 
-    def _update_progress(self, completed, total):
-        self._call_in_gui(lambda: self._update_progress_gui(completed, total))
+        self.x_min, self.x_max = new_x_min, new_x_max
+        self.y_min, self.y_max = new_y_min, new_y_max
 
-    def _update_progress_gui(self, completed, total):
-        self._set_status(f'Rendering... {completed}/{total} chunks')
-        self._set_progress(completed, total)
-        self.fig.canvas.draw_idle()
+        self.draw_mandelbrot()
 
-    def on_press(self, event):
-        if event.inaxes != self.ax or event.button != 1:
-            return
-        self.press_event = event
-        if self.rect_patch is None:
-            self.rect_patch = Rectangle((event.xdata, event.ydata), 0, 0,
-                                        linewidth=1.2, edgecolor='white', facecolor='none', linestyle='--')
-            self.ax.add_patch(self.rect_patch)
+    def mandelbrot(self, c):
+        z = 0
+        n = 0
+        while abs(z) <= 2 and n < self.max_iter:
+            z = z*z + c
+            n += 1
+        return n
 
-    def on_motion(self, event):
-        if self.press_event is None or event.inaxes != self.ax:
-            return
-        x0, y0 = self.press_event.xdata, self.press_event.ydata
-        x1, y1 = event.xdata, event.ydata
-        if x0 is None or y0 is None or x1 is None or y1 is None:
-            return
-        self.rect_patch.set_bounds(min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0))
-        self.fig.canvas.draw_idle()
+    def _draw_mandelbrot_background(self):
+        tile_size = 128
+        tile_width = max(1, (self.width + tile_size - 1) // tile_size)
+        tile_height = max(1, (self.height + tile_size - 1) // tile_size)
 
-    def on_release(self, event):
-        if self.press_event is None or event.inaxes != self.ax or event.button != 1:
-            self._clear_rectangle()
-            return
+        colors = np.empty((self.height, self.width, 3), dtype=np.uint8)
+        tiles = []
+        for ty in range(tile_height):
+            y_start = ty * tile_size
+            y_end = min(self.height, y_start + tile_size)
+            for tx in range(tile_width):
+                x_start = tx * tile_size
+                x_end = min(self.width, x_start + tile_size)
+                tiles.append((self.x_min, self.x_max, self.y_min, self.y_max, self.width, self.height, self.max_iter, x_start, x_end, y_start, y_end))
 
-        x0, y0 = self.press_event.xdata, self.press_event.ydata
-        x1, y1 = event.xdata, event.ydata
-        self.press_event = None
+        max_workers = min(os.cpu_count() or 1, len(tiles))
+        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(_compute_mandelbrot_tile, *tile) for tile in tiles]
+            for future in concurrent.futures.as_completed(futures):
+                x_start, y_start, div_time = future.result()
+                tile_h, tile_w = div_time.shape
+                tile_colors = np.empty((tile_h, tile_w, 3), dtype=np.uint8)
+                tile_colors[..., 0] = (div_time % 8) * 32
+                tile_colors[..., 1] = (div_time % 16) * 16
+                tile_colors[..., 2] = (div_time % 32) * 8
+                colors[y_start:y_start + tile_h, x_start:x_start + tile_w, :] = tile_colors
 
-        if x0 is None or y0 is None or x1 is None or y1 is None:
-            self._clear_rectangle()
-            return
+        self.master.after(0, self._finish_draw, colors)
 
-        if abs(x1 - x0) < 1e-6 or abs(y1 - y0) < 1e-6:
-            self._clear_rectangle()
-            return
+    def _finish_draw(self, colors):
+        image = Image.fromarray(colors, mode="RGB")
+        self.photo = ImageTk.PhotoImage(image)
+        self.canvas.create_image(0, 0, anchor=tk.NW, image=self.photo)
 
-        self.xmin, self.xmax = sorted([x0, x1])
-        self.ymin, self.ymax = sorted([y0, y1])
-        self.redraw()
-        self._clear_rectangle()
+        if self.drawing_text_id:
+            self.canvas.delete(self.drawing_text_id)
+            self.drawing_text_id = None
 
-    def on_key(self, event):
-        if event.key == 'r':
-            self.reset_view()
+    def draw_mandelbrot(self):
+        if self.drawing_text_id:
+            self.canvas.delete(self.drawing_text_id)
+        self.drawing_text_id = self.canvas.create_text(self.width/2, self.height/2, text="描画中...", fill="white", font=("Arial", 24))
+        self.master.update_idletasks()
 
-    def zoom(self, center_x, center_y, scale=0.5):
-        width = (self.xmax - self.xmin) * scale
-        height = (self.ymax - self.ymin) * scale
-        self.xmin = center_x - width / 2
-        self.xmax = center_x + width / 2
-        self.ymin = center_y - height / 2
-        self.ymax = center_y + height / 2
-        self.redraw()
+        threading.Thread(target=self._draw_mandelbrot_background, daemon=True).start()
 
-    def reset_view(self):
-        self.xmin, self.xmax = -2.0, 1.0
-        self.ymin, self.ymax = -1.5, 1.5
-        self.redraw()
-
-    def _clear_rectangle(self):
-        if self.rect_patch is not None:
-            self.rect_patch.remove()
-            self.rect_patch = None
-            self.fig.canvas.draw_idle()
-
-
-def main():
-    MandelbrotExplorer(width=900, height=650, max_iter=150)
-
-
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = MandelbrotApp(root)
+    root.mainloop()
