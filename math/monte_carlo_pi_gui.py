@@ -1,4 +1,3 @@
-
 import tkinter as tk
 from tkinter import messagebox
 import random
@@ -94,6 +93,7 @@ class MonteCarloPiApp:
         self.label_inside_circle_value.config(text=str(points_inside_circle))
         self.label_total_points_value.config(text=str(num_trials))
 
-root = tk.Tk()
-app = MonteCarloPiApp(root)
-root.mainloop()
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = MonteCarloPiApp(root)
+    root.mainloop()

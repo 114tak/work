@@ -177,7 +177,26 @@ class MandelbrotPygame:
                         self.drag_end = event.pos
                 elif event.type == pygame.MOUSEMOTION:
                     if self.dragging:
-                        self.drag_end = event.pos
+                        x0, y0 = self.drag_start
+                        x_current, y_current = event.pos
+
+                        # 縦横比を維持するための計算
+                        aspect_ratio = self.width / self.height
+                        
+                        # ドラッグ開始点からのXおよびY方向の距離
+                        dx = x_current - x0
+                        dy = y_current - y0
+
+                        # 縦横比に基づいて短い方の軸を基準に長い方の軸を調整
+                        if abs(dx / aspect_ratio) > abs(dy):
+                            # 幅が優勢な場合、高さを調整
+                            adjusted_dy = abs(dx / aspect_ratio) * (1 if dy > 0 else -1)
+                            self.drag_end = (x_current, y0 + adjusted_dy)
+                        else:
+                            # 高さが優勢な場合、幅を調整
+                            adjusted_dx = abs(dy * aspect_ratio) * (1 if dx > 0 else -1)
+                            self.drag_end = (x0 + adjusted_dx, y_current)
+
                 elif event.type == pygame.MOUSEBUTTONUP:
                     if event.button == 1 and self.dragging:
                         self.dragging = False
@@ -217,6 +236,27 @@ class MandelbrotPygame:
         right = max(x0, x1)
         top = min(y0, y1)
         bottom = max(y0, y1)
+
+        # 選択範囲の幅と高さを計算
+        select_width = right - left
+        select_height = bottom - top
+
+        # 現在の表示領域の縦横比を計算
+        current_aspect_ratio = self.width / self.height
+
+        # 選択範囲の縦横比を維持しつつ、元の縦横比に合わせるように調整
+        if select_width / select_height > current_aspect_ratio:
+            # 選択範囲が元の縦横比よりも横長の場合、高さを調整
+            target_select_height = select_width / current_aspect_ratio
+            center_y = (top + bottom) / 2
+            top = center_y - target_select_height / 2
+            bottom = center_y + target_select_height / 2
+        else:
+            # 選択範囲が元の縦横比よりも縦長の場合、幅を調整
+            target_select_width = select_height * current_aspect_ratio
+            center_x = (left + right) / 2
+            left = center_x - target_select_width / 2
+            right = center_x + target_select_width / 2
 
         new_xmin = self.xmin + (left / self.width) * (self.xmax - self.xmin)
         new_xmax = self.xmin + (right / self.width) * (self.xmax - self.xmin)
